@@ -838,7 +838,7 @@
                              
                             <div class="compact-period-header">
                                 <i class="fas fa-chart-area"></i>
-                                <span>{{ intervalName.toUpperCase() }}阻力位/支撑位：</span>
+                                <span>{{ getIntervalDisplayName(intervalName) }}阻力位/支撑位：</span>
                             </div>
                             
                             <!-- 阻力位和支撑位统一显示 -->
@@ -867,10 +867,10 @@
                                                  </div>
                                              </span>
                                              <span class="compact-confidence" :class="getConfidenceClass(resistance.strength)">
-                                                 置信度:{{ resistance.strength.toFixed(2) }}
+                                                 测试次数:{{ resistance.test_count }}
                                                  <div class="tooltip confidence-tooltip">
-                                                     <div>置信度说明:</div>
-                                                     <div>该值表示该阻力位的可靠程度</div>
+                                                     <div>测试次数说明:</div>
+                                                     <div>该值表示该阻力位被测试的次数</div>
                                                  </div>
                                              </span>
                                         </div>
@@ -903,10 +903,10 @@
                                                  </div>
                                              </span>
                                              <span class="compact-confidence" :class="getConfidenceClass(support.strength)">
-                                                 置信度:{{ support.strength.toFixed(2) }}
+                                                 测试次数:{{ support.test_count }}
                                                  <div class="tooltip confidence-tooltip">
-                                                     <div>置信度说明:</div>
-                                                     <div>该值表示该支撑位的可靠程度</div>
+                                                     <div>测试次数说明:</div>
+                                                     <div>该值表示该支撑位被测试的次数</div>
                                                  </div>
                                              </span>
                                         </div>
@@ -918,16 +918,14 @@
                     
                     <!-- 强度与置信度说明 -->
                     <div class="level-explanation">
-                        <div class="explanation-title"><i class="fas fa-info-circle"></i> 强度与置信度说明</div>
+                        <div class="explanation-title"><i class="fas fa-info-circle"></i> 阻力位支撑位分析逻辑说明</div>
                         <div class="explanation-content">
-                            <p><strong>强度</strong>：表示价格在该位置的阻力/支撑力度</p>
-                            <p>
-                                <span class="compact-strength strength-low" style="margin:0 5px">低 (&lt;30%)</span>
-                                <span class="compact-strength strength-medium" style="margin:0 5px">中 (30%-70%)</span>
-                                <span class="compact-strength strength-high" style="margin:0 5px">高 (>70%)</span>
-                            </p>
-                            <p><strong>置信度</strong>：根据多个技术指标聚合计算得出，数值越高表示越可靠</p>
-                            <p><strong>距离</strong>：表示该价格与当前价格的百分比距离</p>
+                            <p><strong>支撑位定义</strong>：支撑位是一个价格水平，当股价下跌接近这个水平时，买方（买入力量）会显著增强，阻止价格进一步下跌。</p>
+                            <p><strong>阻力位定义</strong>：阻力位是一个价格水平，当股价上涨接近这个水平时，卖方（抛售压力）会显著增强，阻止价格进一步上升。</p>
+                            <p><strong>核心要点</strong>：一旦突破，角色互换。当股价有效突破阻力位后，这个阻力位就变成了新的支撑位；当股价有效跌破支撑位后，这个支撑位就变成了新的阻力位。</p>
+                            <p><strong>强度判断</strong>：根据被测试的次数多少进行判断，被测试次数越多，则阻力位或者支撑位越有效。</p>
+                            <p><strong>分析周期</strong>：1分钟、15分钟、日线</p>
+                            <p><strong>显示规则</strong>：只显示被测试次数最多的3个阻力位或支撑位</p>
                         </div>
                     </div>
                 </div>
@@ -1179,6 +1177,16 @@
                     }
                 },
                 methods: {
+                    // 获取周期显示名称
+                    getIntervalDisplayName(interval) {
+                        const names = {
+                            '1m': '1分钟',
+                            '15m': '15分钟', 
+                            '1d': '日线'
+                        };
+                        return names[interval] || interval.toUpperCase();
+                    },
+                    
                     // 获取置信度颜色
                     getConfidenceClass(value) {
                         if (value > 0.7) return 'confidence-high';

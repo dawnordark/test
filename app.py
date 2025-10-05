@@ -100,21 +100,8 @@ PERIOD_MINUTES = {
 }
 
 VALID_PERIODS = ['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']
-RESISTANCE_INTERVALS = ['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']
-
-# 指标权重配置
-INDICATOR_WEIGHTS = {
-    'fib_0.618': 1.5,
-    'ema_200': 1.4,
-    'ema_100': 1.2,
-    'bb_upper': 1.1,
-    'bb_lower': 1.1,
-    'fib_other': 1.0,
-    'ema_50': 0.9,
-    'integer': 0.8,
-    'volume_profile': 1.8,
-    'orderbook': 2.0
-}
+# 修改：只分析1分钟、15分钟和日线
+RESISTANCE_INTERVALS = ['1m', '15m', '1d']
 
 def init_client():
     global client
@@ -240,82 +227,99 @@ def is_latest_highest(oi_data):
     
     return latest_value > max(prev_data) if prev_data else False
 
-def add_volume_profile(symbol, interval):
+def calculate_support_resistance_levels(symbol, interval, klines):
+    """
+    根据新逻辑计算支撑位和阻力位
+    基于K线收盘价进行分析，只考虑1m, 15m, 1d周期
+    """
     try:
-        klines = client.futures_klines(symbol=symbol, interval=interval, limit=500)
-        if not klines or len(klines) < 100:
-            return []
+        if not klines or len(klines) < 20:
+            return {'resistance': [], 'support': []}
         
-        prices = [float(k[4]) for k in klines]
-        volumes = [float(k[5]) for k in klines]
+        # 提取收盘价（基于K线收盘价而不是影线）
+        closes = [float(k[4]) for k in klines]  # 收盘价是第4个元素
         
-        price_range = max(prices) - min(prices)
-        bin_size = price_range / 20
+        # 计算价格水平及其被测试次数
+        price_levels = {}
+        tolerance = 0.001  # 0.1%的价格容差
         
-        volume_profile = {}
-        for i in range(len(prices)):
-            bin_key = round(prices[i] / bin_size) * bin_size
-            volume_profile[bin_key] = volume_profile.get(bin_key, 0) + volumes[i]
+        # 分析每个K线的收盘价，识别支撑位和阻力位
+        for i in range(1, len(closes)-1):
+            current_close = closes[i]
+            
+            # 寻找局部高点和低点
+            is_local_high = closes[i] > closes[i-1] and closes[i] > closes[i+1]
+            is_local_low = closes[i] < closes[i-1] and closes[i] < closes[i+1]
+            
+            # 四舍五入到合适的精度
+            if current_close > 100:
+                rounded_price = round(current_close, 1)
+            elif current_close > 10:
+                rounded_price = round(current_close, 2)
+            elif current_close > 1:
+                rounded_price = round(current_close, 3)
+            else:
+                rounded_price = round(current_close, 4)
+            
+            # 检查是否接近现有价格水平
+            found_existing = False
+            for existing_price in price_levels.keys():
+                if abs(existing_price - rounded_price) / existing_price <= tolerance:
+                    price_levels[existing_price]['count'] += 1
+                    if is_local_high:
+                        price_levels[existing_price]['resistance_tests'] += 1
+                    if is_local_low:
+                        price_levels[existing_price]['support_tests'] += 1
+                    found_existing = True
+                    break
+            
+            if not found_existing:
+                price_levels[rounded_price] = {
+                    'count': 1,
+                    'resistance_tests': 1 if is_local_high else 0,
+                    'support_tests': 1 if is_local_low else 0
+                }
         
-        sorted_profile = sorted(volume_profile.items(), key=lambda x: x[1], reverse=True)
-        return [item[0] for item in sorted_profile[:3]]
-    
+        # 获取当前价格
+        current_price = closes[-1] if closes else 0
+        
+        # 分离阻力位和支撑位
+        resistance_levels = []
+        support_levels = []
+        
+        for price, data in price_levels.items():
+            if data['resistance_tests'] > 0 or data['support_tests'] > 0:
+                # 根据被测试次数计算强度
+                total_tests = data['resistance_tests'] + data['support_tests']
+                strength = min(1.0, total_tests / 10.0)  # 归一化到0-1
+                
+                level_data = {
+                    'price': price,
+                    'strength': round(strength, 2),
+                    'test_count': total_tests,
+                    'resistance_tests': data['resistance_tests'],
+                    'support_tests': data['support_tests'],
+                    'distance_percent': round(((price - current_price) / current_price * 100), 2) if current_price > 0 else 0
+                }
+                
+                # 根据当前价格和测试次数分类
+                if price > current_price and data['resistance_tests'] > 0:
+                    resistance_levels.append(level_data)
+                elif price < current_price and data['support_tests'] > 0:
+                    support_levels.append(level_data)
+        
+        # 按被测试次数排序，只保留前3个
+        resistance_levels.sort(key=lambda x: x['test_count'], reverse=True)
+        support_levels.sort(key=lambda x: x['test_count'], reverse=True)
+        
+        return {
+            'resistance': resistance_levels[:3],
+            'support': support_levels[:3]
+        }
+        
     except Exception as e:
-        logger.error(f"成交量剖面分析失败: {str(e)}")
-        return []
-
-def get_orderbook_liquidity(symbol):
-    try:
-        orderbook = client.futures_order_book(symbol=symbol, limit=50)
-        bids = orderbook['bids']
-        asks = orderbook['asks']
-        
-        liquidity_levels = []
-        
-        ask_levels = {}
-        for price, qty in asks:
-            price_key = round(float(price), 2)
-            ask_levels[price_key] = ask_levels.get(price_key, 0) + float(qty)
-        
-        sorted_asks = sorted(ask_levels.items(), key=lambda x: x[1], reverse=True)
-        liquidity_levels.extend([price for price, qty in sorted_asks[:3]])
-        
-        bid_levels = {}
-        for price, qty in bids:
-            price_key = round(float(price), 2)
-            bid_levels[price_key] = bid_levels.get(price_key, 0) + float(qty)
-        
-        sorted_bids = sorted(bid_levels.items(), key=lambda x: x[1], reverse=True)
-        liquidity_levels.extend([price for price, qty in sorted_bids[:3]])
-        
-        return liquidity_levels
-    
-    except Exception as e:
-        logger.error(f"订单簿分析失败: {str(e)}")
-        return []
-
-def calculate_ema(data, period):
-    """指数移动平均计算"""
-    if len(data) < period:
-        return np.nan
-    
-    alpha = 2 / (period + 1)
-    weights = np.array([(1 - alpha) ** i for i in range(period)][::-1])
-    weights /= weights.sum()
-    
-    return np.dot(data[-period:], weights)
-
-def calculate_bollinger(data, period=20, num_std=2):
-    """布林带计算"""
-    if len(data) < period:
-        return np.nan, np.nan
-    
-    ma = np.mean(data[-period:])
-    std = np.std(data[-period:])
-    
-    upper = ma + (std * num_std)
-    lower = ma - (std * num_std)
-    return upper, lower
+        logger.error(f"计算支撑阻力位失败 {symbol} {interval}: {str(e)}")
+        return {'resistance': [], 'support': []}
 
 def calculate_resistance_levels(symbol):
     try:
@@ -342,155 +346,21 @@ def calculate_resistance_levels(symbol):
             current_price = None
         
         interval_levels = {}
-        volume_profile_levels = add_volume_profile(symbol, '1d')
-        orderbook_levels = get_orderbook_liquidity(symbol)
         
         for interval in RESISTANCE_INTERVALS:
             try:
                 logger.info(f"📊 获取K线数据: {symbol} {interval}")
                 klines = client.futures_klines(symbol=symbol, interval=interval, limit=100)
                 
-                if not klines or len(klines) < 50:
+                if not klines or len(klines) < 20:
                     logger.warning(f"⚠️ {symbol}在{interval}的K线数据不足")
                     continue
 
-                high_prices = [float(k[2]) for k in klines]
-                low_prices = [float(k[3]) for k in klines]
-                close_prices = [float(k[4]) for k in klines]
-                open_prices = [float(k[1]) for k in klines]
+                # 使用新的支撑阻力位计算逻辑
+                levels = calculate_support_resistance_levels(symbol, interval, klines)
+                interval_levels[interval] = levels
                 
-                closes = np.array(close_prices)
-                
-                # 使用内置函数计算技术指标
-                logger.info("📊 使用内置函数计算技术指标")
-                ema50 = calculate_ema(closes, 50)
-                ema100 = calculate_ema(closes, 100)
-                ema200 = calculate_ema(closes, 200)
-                bb_upper, bb_lower = calculate_bollinger(closes, 20, 2)
-                
-                recent_high = max(high_prices)
-                recent_low = min(low_prices)
-                fib_618 = recent_high - (recent_high - recent_low) * 0.618
-                fib_other = [
-                    recent_high - (recent_high - recent_low) * r 
-                    for r in [0.236, 0.382, 0.5, 0.786]
-                ]
-                
-                levels_with_type = []
-                levels_with_type.append(('fib_0.618', fib_618))
-                for level in fib_other:
-                    levels_with_type.append(('fib_other', level))
-                
-                levels_with_type.append(('ema_50', ema50))
-                levels_with_type.append(('ema_100', ema100))
-                levels_with_type.append(('ema_200', ema200))
-                levels_with_type.append(('bb_upper', bb_upper))
-                levels_with_type.append(('bb_lower', bb_lower))
-                
-                # 修复括号错误
-                if current_price and current_price > 0:
-                    try:
-                        # 修复括号问题
-                        exponent = math.floor(math.log10(current_price))
-                        adjusted_exponent = max(0, exponent - 1)
-                        base = 10 ** adjusted_exponent
-                        integer_level = round(current_price / base) * base
-                        levels_with_type.append(('integer', integer_level))
-                    except Exception as e:
-                        logger.error(f"计算心理整数位失败: {str(e)}")
-                
-                for level in volume_profile_levels:
-                    levels_with_type.append(('volume_profile', level))
-                
-                for level in orderbook_levels:
-                    levels_with_type.append(('orderbook', level))
-                
-                level_scores = {}
-                tolerance = current_price * 0.005 if current_price else 0.01
-                
-                for level_type, level_value in levels_with_type:
-                    level_value = round(level_value, 4)
-                    if level_value not in level_scores:
-                        level_scores[level_value] = {
-                            'score': 0.0,
-                            'sources': set()
-                        }
-                    level_scores[level_value]['sources'].add(level_type)
-                
-                for i, (level_type1, level_value1) in enumerate(levels_with_type):
-                    level_value1 = round(level_value1, 4)
-                    for j, (level_type2, level_value2) in enumerate(levels_with_type):
-                        if i == j: 
-                            continue
-                        if abs(level_value1 - level_value2) <= tolerance:
-                            weight1 = INDICATOR_WEIGHTS.get(level_type1, 1.0)
-                            weight2 = INDICATOR_WEIGHTS.get(level_type2, 1.0)
-                            level_scores[level_value1]['score'] += weight1 * weight2
-                
-                merged_levels = []
-                sorted_levels = sorted(level_scores.keys())
-                i = 0
-                while i < len(sorted_levels):
-                    current = sorted_levels[i]
-                    group = [current]
-                    j = i + 1
-                    while j < len(sorted_levels) and sorted_levels[j] - current <= tolerance:
-                        group.append(sorted_levels[j])
-                        j += 1
-                    
-                    best_level = max(group, key=lambda x: level_scores[x]['score'])
-                    merged_sources = set()
-                    for level in group:
-                        merged_sources |= level_scores[level]['sources']
-                    
-                    strength = min(1.0, level_scores[best_level]['score'] / 30.0)
-                    
-                    # 过滤掉强度为0的级别
-                    if strength > 0:
-                        merged_levels.append({
-                            'price': best_level,
-                            'strength': strength,
-                            'sources': len(merged_sources),
-                            'source_types': list(merged_sources)
-                        })
-                    i = j
-                
-                merged_levels.sort(key=lambda x: x['strength'], reverse=True)
-                
-                resistance = []
-                support = []
-                
-                for level in merged_levels:
-                    price = level['price']
-                    if current_price and price > current_price:
-                        distance_percent = (price - current_price) / current_price * 100
-                        resistance.append({
-                            'price': price,
-                            'strength': round(level['strength'], 2),
-                            'distance_percent': round(distance_percent, 2),
-                            'sources': level['sources'],
-                            'source_types': level['source_types']
-                        })
-                    elif current_price and price < current_price:
-                        distance_percent = (price - current_price) / current_price * 100
-                        support.append({
-                            'price': price,
-                            'strength': round(level['strength'], 2),
-                            'distance_percent': round(distance_percent, 2),
-                            'sources': level['sources'],
-                            'source_types': level['source_types']
-                        })
-                
-                resistance.sort(key=lambda x: x['strength'], reverse=True)
-                support.sort(key=lambda x: x['strength'], reverse=True)
-                
-                # 只保留前3个阻力位和支撑位
-                interval_levels[interval] = {
-                    'resistance': resistance[:3],
-                    'support': support[:3]
-                }
-                
-                logger.info(f"📊 {symbol}在{interval}的有效阻力位: {resistance[:3]}, 支撑位: {support[:3]}")
+                logger.info(f"📊 {symbol}在{interval}的有效阻力位: {len(levels['resistance'])}, 支撑位: {len(levels['support'])}")
                 
             except Exception as e:
                 logger.error(f"计算{symbol}在{interval}的阻力位失败: {str(e)}")
@@ -498,9 +368,7 @@ def calculate_resistance_levels(symbol):
 
         levels = {
             'levels': interval_levels,
-            'current_price': current_price or 0,
-            'volume_profile_levels': volume_profile_levels,
-            'orderbook_levels': orderbook_levels
+            'current_price': current_price or 0
         }
         
         resistance_cache[cache_key] = {

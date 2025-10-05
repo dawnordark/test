@@ -1,0 +1,6 @@
+Flask==2.3.3
+requests==2.31.0
+python-binance==1.0.19
+numpy==1.24.3
+flask-cors==4.0.0
+gunicorn==21.2.0

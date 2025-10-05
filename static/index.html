@@ -17,15 +17,15 @@
         }
         
         :root {
-            --bg-primary: #ffffff;
-            --bg-secondary: #f8f9fa;
-            --bg-card: #ffffff;
-            --text-primary: #1e2026;
-            --text-secondary: #707a8a;
+            --bg-primary: #181a20;
+            --bg-secondary: #1e2026;
+            --bg-card: #1e2329;
+            --text-primary: #eaecef;
+            --text-secondary: #848e9c;
             --accent: #f0b90b;
             --positive: #03a66d;
             --negative: #cf304a;
-            --border: #e6e8ea;
+            --border: #2b2f36;
             --card-shadow: none;
             --strength-high: #4dff4d;
             --strength-medium: #ffd24d;
@@ -922,7 +922,7 @@
                         <div class="explanation-content">
                             <p><strong>强度</strong>：表示价格在该位置的阻力/支撑力度</p>
                             <p>
-                                <span class="compact-strength strength-low" style="margin:0 5px">低 (<30%)</span>
+                                <span class="compact-strength strength-low" style="margin:0 5px">低 (&lt;30%)</span>
                                 <span class="compact-strength strength-medium" style="margin:0 5px">中 (30%-70%)</span>
                                 <span class="compact-strength strength-high" style="margin:0 5px">高 (>70%)</span>
                             </p>
@@ -1097,7 +1097,7 @@
                             <i class="fas fa-box-open"></i>
                             <span>暂无短期活跃币种</span>
                         </div>
-        <div v-else v-for="coin in sortedShortTermActive" :key="coin.symbol + 'short'">
+                        <div v-else v-for="coin in sortedShortTermActive" :key="coin.symbol + 'short'">
                             <!-- 优化后的短期活跃币种显示 -->
                             <div class="short-term-item">
                                 <div class="short-term-name">
@@ -1123,7 +1123,7 @@
         </div>
         
         <footer>
-            <p>币安风格合约分析系统 &copy; 2023 | 基于多周期持仓量分析</p>
+            <p>币安合约分析 &copy; 2099 | 基于多周期持仓量分析</p>
             <p>数据更新时间: {{ lastUpdated || '加载中...' }}</p>
         </footer>
     </div>

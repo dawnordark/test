@@ -918,10 +918,10 @@ def start_background_threads():
     logger.info("✅ 后台线程启动成功")
     return True
 
-# 替换原来的 if __name__ == '__main__': 部分
 if __name__ == '__main__':
     # Zeabur 会通过环境变量提供端口
     PORT = int(os.environ.get("PORT", 3000))
     # 确保静态文件服务正确配置
-    app.static_folder = 'static'
+    if not os.path.exists('static'):
+        os.makedirs('static')
     app.run(host='0.0.0.0', port=PORT, debug=False)

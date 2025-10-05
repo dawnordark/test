@@ -53,11 +53,12 @@ logger = logging.getLogger(__name__)
 logger.info(f"✅ 日志级别设置为: {LOG_LEVEL}")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app = Flask(__name__, static_folder=os.path.join(BASE_DIR, 'static'), static_url_path='/static')
+app = Flask(__name__, static_folder=os.path.join(BASE_DIR, 'static'), static_url_path='/')
 # 扩展 CORS 配置
 CORS(app, resources={
     r"/api/*": {"origins": "*"},
-    r"/static/*": {"origins": "*"}
+    r"/static/*": {"origins": "*"},
+    r"/*": {"origins": "*"}
 })
 
 # Binance API 配置
@@ -783,7 +784,7 @@ def index():
         logger.error(f"❌ 处理首页请求失败: {str(e)}")
         return "Internal Server Error", 500
 
-@app.route('/static/<path:filename>')
+@app.route('/<path:filename>')
 def static_files(filename):
     return send_from_directory(app.static_folder, filename)
 
@@ -984,7 +985,6 @@ def start_background_threads():
     logger.info("✅ 后台线程启动成功")
     return True
 
-# 在文件末尾修改这部分
 if __name__ == '__main__':
     PORT = int(os.environ.get("PORT", 9600))
     

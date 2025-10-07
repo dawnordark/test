@@ -84,7 +84,8 @@ OI_CACHE_EXPIRATION = 5 * 60
 
 # 使用队列进行线程间通信
 analysis_queue = queue.Queue()
-executor = ThreadPoolExecutor(max_workers=10)
+# 修改：将并行分析从10条改为5条
+executor = ThreadPoolExecutor(max_workers=5)
 
 # 只保留有效的9个周期
 PERIOD_MINUTES = {
@@ -141,16 +142,19 @@ def get_next_update_time(period):
         period_minutes = int(period[:-1])
         current_minute = now.minute
         current_period_minute = (current_minute // period_minutes) * period_minutes
-        next_update = now.replace(minute=current_period_minute, second=2, microsecond=0) + timedelta(minutes=period_minutes)
+        # 修改：延长1分钟，从2秒改为62秒
+        next_update = now.replace(minute=current_period_minute, second=62, microsecond=0) + timedelta(minutes=period_minutes)
         if next_update < now:
             next_update += timedelta(minutes=period_minutes)
     elif period.endswith('h'):
         period_hours = int(period[:-1])
         current_hour = now.hour
         current_period_hour = (current_hour // period_hours) * period_hours
-        next_update = now.replace(hour=current_period_hour, minute=0, second=2, microsecond=0) + timedelta(hours=period_hours)
+        # 修改：延长1分钟，从2秒改为62秒
+        next_update = now.replace(hour=current_period_hour, minute=0, second=62, microsecond=0) + timedelta(hours=period_hours)
     else:
-        next_update = now.replace(hour=0, minute=0, second=2, microsecond=0) + timedelta(days=1)
+        # 修改：延长1分钟，从2秒改为62秒
+        next_update = now.replace(hour=0, minute=0, second=62, microsecond=0) + timedelta(days=1)
 
     return next_update
 
@@ -384,6 +388,9 @@ def calculate_resistance_levels(symbol):
 def analyze_symbol(symbol):
     try:
         logger.info(f"🔍 开始分析币种: {symbol}")
+        # 修改：增加100毫秒延迟
+        time.sleep(0.1)
+        
         symbol_result = {
             'symbol': symbol,
             'daily_rising': None,

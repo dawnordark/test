@@ -154,7 +154,7 @@ def get_next_update_time(period):
         next_update = now.replace(hour=current_period_hour, minute=0, second=62, microsecond=0) + timedelta(hours=period_hours)
     else:
         # 修改：延长1分钟，从2秒改为62秒
-        next_update = now.replace(hour=0, minute=0, second=62, microsecond=0) + timedelta(days=1)
+        next_update = now.replace(hour=0, minute=0, second=59, microsecond=0) + timedelta(days=1)
 
     return next_update
 

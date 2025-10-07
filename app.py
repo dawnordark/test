@@ -142,19 +142,28 @@ def get_next_update_time(period):
         period_minutes = int(period[:-1])
         current_minute = now.minute
         current_period_minute = (current_minute // period_minutes) * period_minutes
-        # 修改：延长1分钟，从2秒改为62秒
-        next_update = now.replace(minute=current_period_minute, second=62, microsecond=0) + timedelta(minutes=period_minutes)
+        
+        # 修正：先创建基础时间，然后加上1分钟
+        base_time = now.replace(minute=current_period_minute, second=0, microsecond=0)
+        next_update = base_time + timedelta(minutes=period_minutes, seconds=60)  # 加上1分钟
+        
         if next_update < now:
             next_update += timedelta(minutes=period_minutes)
     elif period.endswith('h'):
         period_hours = int(period[:-1])
         current_hour = now.hour
         current_period_hour = (current_hour // period_hours) * period_hours
-        # 修改：延长1分钟，从2秒改为62秒
-        next_update = now.replace(hour=current_period_hour, minute=0, second=62, microsecond=0) + timedelta(hours=period_hours)
+        
+        # 修正：先创建基础时间，然后加上1分钟
+        base_time = now.replace(hour=current_period_hour, minute=0, second=0, microsecond=0)
+        next_update = base_time + timedelta(hours=period_hours, seconds=60)  # 加上1分钟
+        
+        if next_update < now:
+            next_update += timedelta(hours=period_hours)
     else:
-        # 修改：延长1分钟，从2秒改为62秒
-        next_update = now.replace(hour=0, minute=0, second=59, microsecond=0) + timedelta(days=1)
+        # 修正：先创建基础时间，然后加上1分钟
+        base_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        next_update = base_time + timedelta(days=1, seconds=60)  # 加上1分钟
 
     return next_update
 
@@ -861,7 +870,7 @@ def start_background_threads():
     return True
 
 if __name__ == '__main__':
-    PORT = int(os.environ.get("PORT", 9600))
+    PORT = int(os.environ.get("PORT", 8080))
     
     logger.info("=" * 50)
     logger.info(f"🚀 启动加密货币持仓量分析服务")

@@ -66,7 +66,7 @@ OI_CACHE_EXPIRATION = 5 * 60
 
 # 使用队列进行线程间通信
 analysis_queue = queue.Queue()
-executor = ThreadPoolExecutor(max_workers=3)  # 减少工作线程数
+executor = ThreadPoolExecutor(max_workers=5)  # 增加工作线程数
 
 # 周期配置
 PERIOD_MINUTES = {
@@ -76,6 +76,10 @@ PERIOD_MINUTES = {
 
 VALID_PERIODS = ['5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']
 RESISTANCE_INTERVALS = ['1m', '15m', '1d']
+
+# 分析线程状态
+analysis_thread_running = False
+analysis_thread = None
 
 def init_client():
     """初始化 Binance 客户端"""
@@ -113,37 +117,26 @@ def init_client():
     logger.critical("🔥 无法初始化Binance客户端")
     return False
 
-def get_next_update_time(period):
-    """计算下次更新时间"""
+def get_next_analysis_time():
+    """计算下次分析时间（5分钟周期+45秒延迟）"""
     tz_shanghai = timezone(timedelta(hours=8))
     now = datetime.now(tz_shanghai)
-    minutes = PERIOD_MINUTES.get(period, 5)
     
-    if period.endswith('m'):
-        period_minutes = int(period[:-1])
-        current_minute = now.minute
-        current_period_minute = (current_minute // period_minutes) * period_minutes
-        
-        base_time = now.replace(minute=current_period_minute, second=0, microsecond=0)
-        next_update = base_time + timedelta(minutes=period_minutes, seconds=60)
-        
-        if next_update < now:
-            next_update += timedelta(minutes=period_minutes)
-    elif period.endswith('h'):
-        period_hours = int(period[:-1])
-        current_hour = now.hour
-        current_period_hour = (current_hour // period_hours) * period_hours
-        
-        base_time = now.replace(hour=current_period_hour, minute=0, second=0, microsecond=0)
-        next_update = base_time + timedelta(hours=period_hours, seconds=60)
-        
-        if next_update < now:
-            next_update += timedelta(hours=period_hours)
-    else:
-        base_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        next_update = base_time + timedelta(days=1, seconds=60)
-
-    return next_update
+    # 计算当前5分钟周期的开始时间
+    current_minute = now.minute
+    current_period_minute = (current_minute // 5) * 5
+    
+    # 当前5分钟周期的结束时间
+    current_period_end = now.replace(minute=current_period_minute, second=0, microsecond=0) + timedelta(minutes=5)
+    
+    # 下次分析时间 = 当前周期结束时间 + 45秒延迟
+    next_analysis = current_period_end + timedelta(seconds=45)
+    
+    # 如果下次分析时间已经过去，则计算下一个周期
+    if next_analysis <= now:
+        next_analysis = current_period_end + timedelta(minutes=5, seconds=45)
+    
+    return next_analysis
 
 def get_open_interest(symbol, period, use_cache=True):
     """获取持仓量数据"""
@@ -162,7 +155,7 @@ def get_open_interest(symbol, period, use_cache=True):
             if 'expiration' in cached_data and cached_data['expiration'] > current_time:
                 return cached_data['data']
 
-        logger.info(f"📡 请求持仓量数据: {symbol} {period}")
+        logger.debug(f"📡 请求持仓量数据: {symbol} {period}")
         url = "https://fapi.binance.com/futures/data/openInterestHist"
         params = {'symbol': symbol, 'period': period, 'limit': 30}
 
@@ -209,206 +202,13 @@ def is_latest_highest(oi_series):
     
     return latest_value > max(prev_data) if prev_data else False
 
-def calculate_support_resistance_levels(symbol, interval, klines):
-    """计算支撑位和阻力位"""
+def analyze_short_term_active(symbol):
+    """分析短期活跃币种"""
     try:
-        if not klines or len(klines) < 20:
-            return {'resistance': [], 'support': []}
-        
-        # 提取收盘价
-        closes = [float(k[4]) for k in klines]
-        
-        # 计算价格水平及其被测试次数
-        price_levels = {}
-        tolerance = 0.001
-        
-        for i in range(1, len(closes)-1):
-            current_close = closes[i]
-            
-            # 寻找局部高点和低点
-            is_local_high = closes[i] > closes[i-1] and closes[i] > closes[i+1]
-            is_local_low = closes[i] < closes[i-1] and closes[i] < closes[i+1]
-            
-            # 四舍五入到合适的精度
-            if current_close > 100:
-                rounded_price = round(current_close, 1)
-            elif current_close > 10:
-                rounded_price = round(current_close, 2)
-            elif current_close > 1:
-                rounded_price = round(current_close, 3)
-            else:
-                rounded_price = round(current_close, 4)
-            
-            # 检查是否接近现有价格水平
-            found_existing = False
-            for existing_price in price_levels.keys():
-                if abs(existing_price - rounded_price) / existing_price <= tolerance:
-                    price_levels[existing_price]['count'] += 1
-                    if is_local_high:
-                        price_levels[existing_price]['resistance_tests'] += 1
-                    if is_local_low:
-                        price_levels[existing_price]['support_tests'] += 1
-                    found_existing = True
-                    break
-            
-            if not found_existing:
-                price_levels[rounded_price] = {
-                    'count': 1,
-                    'resistance_tests': 1 if is_local_high else 0,
-                    'support_tests': 1 if is_local_low else 0
-                }
-        
-        # 获取当前价格
-        current_price = closes[-1] if closes else 0
-        
-        # 分离阻力位和支撑位
-        resistance_levels = []
-        support_levels = []
-        
-        for price, data in price_levels.items():
-            if data['resistance_tests'] > 0 or data['support_tests'] > 0:
-                total_tests = data['resistance_tests'] + data['support_tests']
-                strength = min(1.0, total_tests / 10.0)
-                
-                level_data = {
-                    'price': price,
-                    'strength': round(strength, 2),
-                    'test_count': total_tests,
-                    'resistance_tests': data['resistance_tests'],
-                    'support_tests': data['support_tests'],
-                    'distance_percent': round(((price - current_price) / current_price * 100), 2) if current_price > 0 else 0
-                }
-                
-                if price > current_price and data['resistance_tests'] > 0:
-                    resistance_levels.append(level_data)
-                elif price < current_price and data['support_tests'] > 0:
-                    support_levels.append(level_data)
-        
-        # 按被测试次数排序，只保留前3个
-        resistance_levels.sort(key=lambda x: x['test_count'], reverse=True)
-        support_levels.sort(key=lambda x: x['test_count'], reverse=True)
-        
-        return {
-            'resistance': resistance_levels[:3],
-            'support': support_levels[:3]
-        }
-        
-    except Exception as e:
-        logger.error(f"计算支撑阻力位失败 {symbol} {interval}: {str(e)}")
-        return {'resistance': [], 'support': []}
-
-def calculate_resistance_levels(symbol):
-    """计算阻力位"""
-    try:
-        logger.info(f"📊 计算阻力位: {symbol}")
-        now = time.time()
-        
-        cache_key = f"{symbol}_resistance"
-        if cache_key in resistance_cache:
-            cache_data = resistance_cache[cache_key]
-            if cache_data['expiration'] > now:
-                return cache_data['levels']
-        
-        if client is None and not init_client():
-            return {'levels': {}, 'current_price': 0}
-        
-        try:
-            ticker = client.futures_symbol_ticker(symbol=symbol)
-            current_price = float(ticker['price'])
-        except Exception:
-            current_price = None
-        
-        interval_levels = {}
-        
-        for interval in RESISTANCE_INTERVALS:
-            try:
-                klines = client.futures_klines(symbol=symbol, interval=interval, limit=100)
-                
-                if not klines or len(klines) < 20:
-                    continue
-
-                levels = calculate_support_resistance_levels(symbol, interval, klines)
-                interval_levels[interval] = levels
-                
-            except Exception as e:
-                logger.error(f"计算{symbol}在{interval}的阻力位失败: {str(e)}")
-
-        levels = {
-            'levels': interval_levels,
-            'current_price': current_price or 0
-        }
-        
-        resistance_cache[cache_key] = {
-            'levels': levels,
-            'expiration': now + RESISTANCE_CACHE_EXPIRATION
-        }
-        return levels
-    except Exception as e:
-        logger.error(f"计算{symbol}的阻力位失败: {str(e)}")
-        return {'levels': {}, 'current_price': 0}
-
-def analyze_symbol(symbol):
-    """分析单个币种"""
-    try:
-        symbol_result = {
-            'symbol': symbol,
-            'daily_rising': None,
-            'short_term_active': None,
-            'all_cycle_rising': None,
-            'period_status': {p: False for p in VALID_PERIODS},
-            'period_count': 0
-        }
-
-        daily_oi = get_open_interest(symbol, '1d')
-        daily_series = daily_oi.get('series', [])
-        
-        if len(daily_series) >= 30:
-            daily_status = is_latest_highest(daily_series)
-            symbol_result['period_status']['1d'] = daily_status
-            
-            if daily_status:
-                daily_change = ((daily_series[-1] - daily_series[-30]) / daily_series[-30]) * 100
-                
-                daily_rising_item = {
-                    'symbol': symbol,
-                    'oi': daily_series[-1],
-                    'change': round(daily_change, 2),
-                    'period_status': symbol_result['period_status'].copy()
-                }
-                symbol_result['daily_rising'] = daily_rising_item
-                symbol_result['period_count'] = 1
-
-                all_intervals_up = True
-                for period in VALID_PERIODS:
-                    if period == '1d':
-                        continue
-                        
-                    oi_data = get_open_interest(symbol, period)
-                    oi_series = oi_data.get('series', [])
-                    
-                    status = len(oi_series) >= 30 and is_latest_highest(oi_series)
-                    symbol_result['period_status'][period] = status
-                    
-                    if status:
-                        symbol_result['period_count'] += 1
-                    else:
-                        all_intervals_up = False
-
-                if all_intervals_up:
-                    symbol_result['all_cycle_rising'] = {
-                        'symbol': symbol,
-                        'oi': daily_series[-1],
-                        'change': round(daily_change, 2),
-                        'period_count': symbol_result['period_count'],
-                        'period_status': symbol_result['period_status'].copy()
-                    }
-                
-                if symbol_result['daily_rising']:
-                    symbol_result['daily_rising']['period_status'] = symbol_result['period_status'].copy()
-                    symbol_result['daily_rising']['period_count'] = symbol_result['period_count']
-
         min5_oi = get_open_interest(symbol, '5m')
         min5_series = min5_oi.get('series', [])
+        daily_oi = get_open_interest(symbol, '1d')
+        daily_series = daily_oi.get('series', [])
         
         if len(min5_series) >= 30 and len(daily_series) >= 30:
             min5_max = max(min5_series[-30:])
@@ -418,70 +218,186 @@ def analyze_symbol(symbol):
                 ratio = min5_max / daily_avg
                 
                 if ratio > 1.5:
-                    symbol_result['short_term_active'] = {
+                    return {
                         'symbol': symbol,
                         'oi': min5_series[-1],
                         'ratio': round(ratio, 2)
                     }
-
-        return symbol_result
+        return None
     except Exception as e:
-        logger.error(f"❌ 处理{symbol}时出错: {str(e)}")
-        return {
-            'symbol': symbol,
-            'period_status': {p: False for p in VALID_PERIODS},
-            'period_count': 0
-        }
+        logger.error(f"❌ 分析{symbol}短期活跃失败: {str(e)}")
+        return None
+
+def analyze_daily_rising(symbol):
+    """分析日线上涨币种"""
+    try:
+        daily_oi = get_open_interest(symbol, '1d')
+        daily_series = daily_oi.get('series', [])
+        
+        if len(daily_series) >= 30:
+            daily_status = is_latest_highest(daily_series)
+            
+            if daily_status:
+                daily_change = ((daily_series[-1] - daily_series[-30]) / daily_series[-30]) * 100
+                
+                return {
+                    'symbol': symbol,
+                    'oi': daily_series[-1],
+                    'change': round(daily_change, 2),
+                    'period_status': {'1d': True},
+                    'period_count': 1
+                }
+        return None
+    except Exception as e:
+        logger.error(f"❌ 分析{symbol}日线上涨失败: {str(e)}")
+        return None
+
+def analyze_all_cycle_rising(symbol, daily_data):
+    """分析全部周期上涨币种（基于日线上涨币种）"""
+    try:
+        if not daily_data:
+            return None
+            
+        period_status = daily_data['period_status'].copy()
+        period_count = daily_data['period_count']
+        all_intervals_up = True
+        
+        # 分析其他周期
+        for period in VALID_PERIODS:
+            if period == '1d':
+                continue
+                
+            oi_data = get_open_interest(symbol, period)
+            oi_series = oi_data.get('series', [])
+            
+            status = len(oi_series) >= 30 and is_latest_highest(oi_series)
+            period_status[period] = status
+            
+            if status:
+                period_count += 1
+            else:
+                all_intervals_up = False
+        
+        if all_intervals_up:
+            return {
+                'symbol': symbol,
+                'oi': daily_data['oi'],
+                'change': daily_data['change'],
+                'period_count': period_count,
+                'period_status': period_status
+            }
+        
+        # 即使不是全部周期上涨，也更新日线数据的周期状态
+        daily_data['period_status'] = period_status
+        daily_data['period_count'] = period_count
+        
+        return None
+    except Exception as e:
+        logger.error(f"❌ 分析{symbol}全部周期上涨失败: {str(e)}")
+        return None
 
 def get_high_volume_symbols():
-    """获取高交易量币种"""
+    """获取高交易量币种 - 移除数量限制"""
     if client is None and not init_client():
+        logger.warning("❌ 无法获取高交易量币种：客户端未初始化")
         return []
 
     try:
         tickers = client.futures_ticker()
+        # 移除数量限制，返回所有符合条件的币种
         filtered = [
             t for t in tickers if float(t.get('quoteVolume', 0)) > 10000000
             and t.get('symbol', '').endswith('USDT')
         ]
-        return [t['symbol'] for t in filtered[:20]]  # 限制币种数量
+        symbols = [t['symbol'] for t in filtered]  # 移除 [:20] 限制
+        logger.info(f"📊 获取到 {len(symbols)} 个高交易量币种")
+        return symbols
     except Exception as e:
         logger.error(f"❌ 获取高交易量币种失败: {str(e)}")
         return []
 
 def analyze_trends():
-    """分析趋势"""
+    """优化后的趋势分析逻辑"""
     start_time = time.time()
-    logger.info("🔍 开始分析币种趋势...")
+    logger.info("🔍 开始优化分析币种趋势...")
+    
+    # 步骤1: 获取高交易量币种
     symbols = get_high_volume_symbols()
     
     if not symbols:
+        logger.warning("⚠️ 没有获取到高交易量币种，返回空数据")
         return data_cache
 
-    daily_rising = []
     short_term_active = []
+    daily_rising = []
     all_cycle_rising = []
 
-    futures = [executor.submit(analyze_symbol, symbol) for symbol in symbols]
+    logger.info(f"📊 开始分析 {len(symbols)} 个币种...")
     
-    for future in as_completed(futures):
-        try:
-            result = future.result()
-            if result.get('daily_rising'):
-                daily_rising.append(result['daily_rising'])
-            if result.get('short_term_active'):
-                short_term_active.append(result['short_term_active'])
-            if result.get('all_cycle_rising'):
-                all_cycle_rising.append(result['all_cycle_rising'])
-        except Exception as e:
-            logger.error(f"❌ 处理币种时出错: {str(e)}")
+    # 分批处理币种
+    batch_size = 20
+    batches = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+    
+    for batch_num, batch in enumerate(batches):
+        logger.info(f"📦 处理批次 {batch_num + 1}/{len(batches)} ({len(batch)} 个币种)")
+        
+        # 步骤2: 分析短期活跃币种
+        logger.info(f"🔄 分析短期活跃币种...")
+        short_term_futures = [executor.submit(analyze_short_term_active, symbol) for symbol in batch]
+        
+        for future in as_completed(short_term_futures):
+            try:
+                result = future.result()
+                if result:
+                    short_term_active.append(result)
+            except Exception as e:
+                logger.error(f"❌ 处理短期活跃币种时出错: {str(e)}")
+        
+        # 步骤3: 分析日线上涨币种
+        logger.info(f"🔄 分析日线上涨币种...")
+        daily_futures = [executor.submit(analyze_daily_rising, symbol) for symbol in batch]
+        daily_results = []
+        
+        for future in as_completed(daily_futures):
+            try:
+                result = future.result()
+                if result:
+                    daily_results.append(result)
+            except Exception as e:
+                logger.error(f"❌ 处理日线上涨币种时出错: {str(e)}")
+        
+        # 步骤4: 对日线上涨币种进行全部周期分析
+        logger.info(f"🔄 分析全部周期上涨币种...")
+        all_cycle_futures = [executor.submit(analyze_all_cycle_rising, result['symbol'], result) for result in daily_results]
+        
+        for future in as_completed(all_cycle_futures):
+            try:
+                result = future.result()
+                if result:
+                    all_cycle_rising.append(result)
+            except Exception as e:
+                logger.error(f"❌ 处理全部周期上涨币种时出错: {str(e)}")
+        
+        # 将日线上涨但非全部周期上涨的币种加入daily_rising
+        daily_rising_symbols = {r['symbol'] for r in daily_rising}
+        all_cycle_symbols = {r['symbol'] for r in all_cycle_rising}
+        
+        for result in daily_results:
+            if result['symbol'] not in all_cycle_symbols:
+                daily_rising.append(result)
+        
+        # 批次之间短暂休息
+        if batch_num < len(batches) - 1:
+            time.sleep(1)
 
+    # 排序结果
     daily_rising.sort(key=lambda x: x.get('period_count', 0), reverse=True)
     short_term_active.sort(key=lambda x: x.get('ratio', 0), reverse=True)
     all_cycle_rising.sort(key=lambda x: x.get('period_count', 0), reverse=True)
 
     analysis_time = time.time() - start_time
     logger.info(f"📊 分析完成: 日线上涨 {len(daily_rising)}个, 短期活跃 {len(short_term_active)}个, 全部周期上涨 {len(all_cycle_rising)}个")
+    logger.info(f"⏱️ 总分析时间: {analysis_time:.2f}秒")
 
     tz_shanghai = timezone(timedelta(hours=8))
     return {
@@ -490,22 +406,34 @@ def analyze_trends():
         'all_cycle_rising': all_cycle_rising,
         'analysis_time': analysis_time,
         'last_updated': datetime.now(tz_shanghai).strftime("%Y-%m-%d %H:%M:%S"),
-        'next_analysis_time': get_next_update_time('5m').strftime("%Y-%m-%d %H:%M:%S")
+        'next_analysis_time': get_next_analysis_time().strftime("%Y-%m-%d %H:%M:%S")
     }
 
 def analysis_worker():
     """分析工作线程"""
-    global data_cache, current_data_cache
+    global data_cache, current_data_cache, analysis_thread_running
+    
     logger.info("🔧 数据分析线程启动")
-
-    while True:
+    analysis_thread_running = True
+    
+    while analysis_thread_running:
         try:
-            task = analysis_queue.get()
-            if task == "STOP":
-                logger.info("🛑 收到停止信号，结束分析线程")
-                analysis_queue.task_done()
+            # 等待到下一个分析时间
+            next_analysis = get_next_analysis_time()
+            wait_seconds = max(5, (next_analysis - datetime.now(timezone.utc)).total_seconds())
+            
+            logger.info(f"⏳ 下次分析时间: {next_analysis.strftime('%H:%M:%S')}")
+            logger.info(f"⏳ 等待时间: {wait_seconds:.1f} 秒")
+            
+            # 等待期间检查停止信号
+            wait_start = time.time()
+            while time.time() - wait_start < wait_seconds and analysis_thread_running:
+                time.sleep(1)
+            
+            if not analysis_thread_running:
                 break
-
+                
+            # 执行分析
             analysis_start = datetime.now(timezone.utc)
             logger.info(f"⏱️ 开始更新数据...")
 
@@ -535,18 +463,17 @@ def analysis_worker():
             analysis_duration = (datetime.now(timezone.utc) - analysis_start).total_seconds()
             logger.info(f"⏱️ 分析耗时: {analysis_duration:.2f}秒")
             
-            next_time = get_next_update_time('5m')
-            wait_seconds = max(60, (next_time - datetime.now(timezone.utc)).total_seconds())
-            logger.info(f"⏳ 下次分析将在 {wait_seconds:.1f} 秒后")
-            
-            time.sleep(wait_seconds)
-            analysis_queue.task_done()
         except Exception as e:
             logger.error(f"❌ 分析失败: {str(e)}")
-            analysis_queue.task_done()
+            # 出错后等待一段时间再继续
+            time.sleep(60)
+    
+    logger.info("🛑 分析线程已停止")
 
 def start_background_threads():
     """启动后台线程"""
+    global analysis_thread
+    
     static_path = app.static_folder
     if not os.path.exists(static_path):
         os.makedirs(static_path)
@@ -564,26 +491,29 @@ def start_background_threads():
         "short_term_active": [],
         "all_cycle_rising": [],
         "analysis_time": 0,
-        "next_analysis_time": get_next_update_time('5m').strftime("%Y-%m-%d %H:%M:%S")
+        "next_analysis_time": get_next_analysis_time().strftime("%Y-%m-%d %H:%M:%S")
     }
     
     # 延迟启动分析线程（避免阻塞应用启动）
     def delayed_start():
         time.sleep(10)  # 等待10秒让应用先启动
         
+        logger.info("🔄 开始初始化分析组件...")
+        
         # 初始化客户端
         if not init_client():
             logger.error("❌ 无法初始化客户端，部分功能可能不可用")
+            # 即使客户端初始化失败，也继续启动分析线程，但会返回空数据
+        else:
+            logger.info("✅ 客户端初始化成功")
         
         # 启动分析线程
-        worker_thread = threading.Thread(target=analysis_worker, name="AnalysisWorker")
-        worker_thread.daemon = True
-        worker_thread.start()
+        global analysis_thread
+        analysis_thread = threading.Thread(target=analysis_worker, name="AnalysisWorker")
+        analysis_thread.daemon = True
+        analysis_thread.start()
         
-        # 提交初始分析任务
-        time.sleep(5)
-        analysis_queue.put("ANALYZE")
-        logger.info("🔄 已提交初始分析任务")
+        logger.info("🔄 分析线程已启动，将在下一个5分钟周期+45秒后开始分析")
     
     start_thread = threading.Thread(target=delayed_start)
     start_thread.daemon = True
@@ -592,7 +522,7 @@ def start_background_threads():
     logger.info("✅ 后台线程启动成功")
     return True
 
-# API路由
+# API路由和其他函数保持不变...
 @app.route('/')
 def index():
     try:
@@ -666,7 +596,7 @@ def get_data():
             'short_term_active': [],
             'all_cycle_rising': [],
             'analysis_time': 0,
-            'next_analysis_time': get_next_update_time('5m').strftime("%Y-%m-%d %H:%M:%S")
+            'next_analysis_time': get_next_analysis_time().strftime("%Y-%m-%d %H:%M:%S")
         })
 
 @app.route('/api/resistance_levels/<symbol>', methods=['GET'])
@@ -722,6 +652,7 @@ def health_check():
         return jsonify({
             'status': 'healthy',
             'binance': binance_status,
+            'analysis_thread_running': analysis_thread_running,
             'last_updated': current_data_cache.get('last_updated', 'N/A'),
             'next_analysis_time': current_data_cache.get('next_analysis_time', 'N/A'),
             'server_time': datetime.now(tz_shanghai).strftime("%Y-%m-%d %H:%M:%S"),
@@ -738,26 +669,55 @@ def status():
     """简化状态检查"""
     return jsonify({
         'status': 'running',
+        'analysis_thread_running': analysis_thread_running,
         'timestamp': datetime.now().isoformat()
     })
 
+@app.route('/api/trigger-analysis', methods=['POST'])
+def trigger_analysis():
+    """手动触发分析（用于调试）"""
+    try:
+        logger.info("🔄 手动触发分析...")
+        result = analyze_trends()
+        
+        global current_data_cache
+        current_data_cache = {
+            "last_updated": result['last_updated'],
+            "daily_rising": result['daily_rising'],
+            "short_term_active": result['short_term_active'],
+            "all_cycle_rising": result['all_cycle_rising'],
+            "analysis_time": result['analysis_time'],
+            "next_analysis_time": result['next_analysis_time']
+        }
+        
+        return jsonify({
+            'status': 'success',
+            'message': '分析完成',
+            'last_updated': result['last_updated']
+        })
+    except Exception as e:
+        logger.error(f"❌ 手动分析失败: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+# 删除原有的 if __name__ == '__main__': 部分，替换为：
+
+def create_app():
+    """创建应用实例，用于 Zeabur 部署"""
+    if start_background_threads():
+        logger.info("✅ 应用初始化完成")
+    return app
+
+# 为了兼容 Zeabur，保留这个启动方式
 if __name__ == '__main__':
     PORT = int(os.environ.get("PORT", 10000))
     
     logger.info("=" * 50)
     logger.info(f"🚀 启动加密货币持仓量分析服务")
     logger.info(f"🌐 服务端口: {PORT}")
-    logger.info(f"🏷️ 环境: {'Render' if IS_RENDER else 'Local'}")
+    logger.info(f"🏷️ 环境: {'Zeabur' if 'ZEABUR' in os.environ else 'Local'}")
     logger.info("=" * 50)
     
-    if start_background_threads():
-        logger.info("🚀 启动服务器...")
-        
-        # 如果在 Render 环境，使用更简单的启动方式
-        if IS_RENDER:
-            # 使用 Gunicorn 兼容的方式
-            app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
-        else:
-            app.run(host='0.0.0.0', port=PORT, debug=False)
-    else:
-        logger.critical("🔥 无法启动服务")
+    app.run(host='0.0.0.0', port=PORT, debug=False)

@@ -231,12 +231,12 @@ def get_open_interest(symbol, period, use_cache=True):
         return {'series': [], 'timestamps': []}
 
 def is_latest_highest(oi_data):
-    if not oi_data or len(oi_data) < 30:
+    if not oi_data or len(oi_series) < 30:
         logger.debug("持仓量数据不足30个点")
         return False
 
-    latest_value = oi_data[-1]
-    prev_data = oi_data[-30:-1]
+    latest_value = oi_series[-1]
+    prev_data = oi_series[-30:-1]
     
     return latest_value > max(prev_data) if prev_data else False
 

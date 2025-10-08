@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, send_from_directory
 
 # 检查是否在 Zeabur 环境
-IS_ZEABUR = os.environ.get('ZEABUR', False) or 'ZEABUR' in os.environ
+IS_ZEABUR = os.environ.get('ZEABUR', False)
 
 # 简化日志配置
 logging.basicConfig(
@@ -66,7 +66,7 @@ OI_CACHE_EXPIRATION = 5 * 60
 
 # 使用队列进行线程间通信
 analysis_queue = queue.Queue()
-executor = ThreadPoolExecutor(max_workers=10)
+executor = ThreadPoolExecutor(max_workers=8)  # Zeabur 环境下减少工作线程数
 
 # 周期配置
 PERIOD_MINUTES = {
@@ -493,40 +493,30 @@ def start_background_threads():
         "next_analysis_time": get_next_analysis_time().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    # 在 Zeabur 环境中，立即启动分析线程，不延迟
-    logger.info("🔄 开始初始化分析组件...")
+    # 延迟启动分析线程（避免阻塞应用启动）
+    def delayed_start():
+        time.sleep(10)  # 等待10秒让应用先启动
+        
+        logger.info("🔄 开始初始化分析组件...")
+        
+        # 初始化客户端
+        if not init_client():
+            logger.error("❌ 无法初始化客户端，部分功能可能不可用")
+            # 即使客户端初始化失败，也继续启动分析线程，但会返回空数据
+        else:
+            logger.info("✅ 客户端初始化成功")
+        
+        # 启动分析线程
+        global analysis_thread
+        analysis_thread = threading.Thread(target=analysis_worker, name="AnalysisWorker")
+        analysis_thread.daemon = True
+        analysis_thread.start()
+        
+        logger.info("🔄 分析线程已启动，将在下一个5分钟周期+45秒后开始分析")
     
-    # 初始化客户端
-    if not init_client():
-        logger.error("❌ 无法初始化客户端，部分功能可能不可用")
-        # 即使客户端初始化失败，也继续启动分析线程，但会返回空数据
-    else:
-        logger.info("✅ 客户端初始化成功")
-    
-    # 启动分析线程
-    global analysis_thread
-    analysis_thread = threading.Thread(target=analysis_worker, name="AnalysisWorker")
-    analysis_thread.daemon = True
-    analysis_thread.start()
-    
-    logger.info("🔄 分析线程已启动，将在下一个5分钟周期+45秒后开始分析")
-    
-    # 在 Zeabur 环境中，立即执行一次分析
-    if IS_ZEABUR:
-        logger.info("🚀 Zeabur环境：立即执行首次分析...")
-        try:
-            result = analyze_trends()
-            current_data_cache = {
-                "last_updated": result['last_updated'],
-                "daily_rising": result['daily_rising'],
-                "short_term_active": result['short_term_active'],
-                "all_cycle_rising": result['all_cycle_rising'],
-                "analysis_time": result['analysis_time'],
-                "next_analysis_time": result['next_analysis_time']
-            }
-            logger.info("✅ Zeabur环境：首次分析完成")
-        except Exception as e:
-            logger.error(f"❌ Zeabur环境：首次分析失败: {str(e)}")
+    start_thread = threading.Thread(target=delayed_start)
+    start_thread.daemon = True
+    start_thread.start()
     
     logger.info("✅ 后台线程启动成功")
     return True
@@ -617,14 +607,6 @@ def get_resistance_levels(symbol):
         if not BINANCE_AVAILABLE:
             return jsonify({'error': 'Binance client not available'}), 503
 
-        # 简化阻力位计算函数
-        def calculate_resistance_levels(symbol):
-            try:
-                logger.info(f"📊 计算阻力位: {symbol}")
-            except Exception as e:
-                logger.error(f"计算{symbol}的阻力位失败: {str(e)}")
-                return {'levels': {}, 'current_price': 0}
-            
         levels = calculate_resistance_levels(symbol)
         
         return jsonify(levels)
@@ -719,22 +701,9 @@ def trigger_analysis():
             'message': str(e)
         }), 500
 
-@app.route('/api/debug', methods=['GET'])
-def debug_info():
-    """调试信息"""
-    return jsonify({
-        'zeabur_env': IS_ZEABUR,
-        'analysis_thread_running': analysis_thread_running,
-        'binance_available': BINANCE_AVAILABLE,
-        'api_key_set': bool(API_KEY),
-        'api_secret_set': bool(API_SECRET),
-        'current_time': datetime.now().isoformat(),
-        'cache_keys': list(oi_data_cache.keys())[:5]  # 显示前5个缓存键
-    })
-
+# Zeabur 启动入口
 if __name__ == '__main__':
-    # 在 Zeabur 中，端口由环境变量决定
-    PORT = int(os.environ.get("PORT", 8080))
+    PORT = int(os.environ.get("PORT", 10000))
     
     logger.info("=" * 50)
     logger.info(f"🚀 启动加密货币持仓量分析服务")
@@ -742,11 +711,8 @@ if __name__ == '__main__':
     logger.info(f"🏷️ 环境: {'Zeabur' if IS_ZEABUR else 'Local'}")
     logger.info("=" * 50)
     
-    # 立即启动后台线程，不等待
     if start_background_threads():
         logger.info("🚀 启动服务器...")
-        
-        # 在 Zeabur 环境中使用简单的启动方式
-        app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+        app.run(host='0.0.0.0', port=PORT, debug=False)
     else:
         logger.critical("🔥 无法启动服务")

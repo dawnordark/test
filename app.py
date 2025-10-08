@@ -316,6 +316,89 @@ def get_high_volume_symbols():
         logger.error(f"❌ 获取高交易量币种失败: {str(e)}")
         return []
 
+def calculate_resistance_levels(symbol):
+    """计算阻力位和支撑位"""
+    try:
+        if client is None and not init_client():
+            return {'levels': {}, 'current_price': 0, 'error': 'Binance client not available'}
+        
+        # 获取当前价格
+        ticker = client.futures_symbol_ticker(symbol=symbol)
+        current_price = float(ticker['price'])
+        
+        levels = {}
+        
+        for interval in RESISTANCE_INTERVALS:
+            try:
+                # 获取K线数据
+                klines = client.futures_klines(
+                    symbol=symbol,
+                    interval=interval,
+                    limit=100
+                )
+                
+                if not klines:
+                    continue
+                
+                # 提取高低价
+                highs = [float(k[2]) for k in klines]  # 最高价
+                lows = [float(k[3]) for k in klines]   # 最低价
+                
+                # 计算阻力位和支撑位（简化版本）
+                resistance_levels = []
+                support_levels = []
+                
+                # 简单的计算方法：寻找局部高点和低点
+                for i in range(2, len(highs)-2):
+                    # 阻力位：局部高点
+                    if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+                       highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                        distance_percent = ((highs[i] - current_price) / current_price) * 100
+                        resistance_levels.append({
+                            'price': highs[i],
+                            'strength': min(1.0, (i / len(highs)) * 2),  # 简单的强度计算
+                            'distance_percent': distance_percent,
+                            'test_count': 1  # 简化版本，实际应该统计测试次数
+                        })
+                
+                for i in range(2, len(lows)-2):
+                    # 支撑位：局部低点
+                    if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+                       lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                        distance_percent = ((lows[i] - current_price) / current_price) * 100
+                        support_levels.append({
+                            'price': lows[i],
+                            'strength': min(1.0, (i / len(lows)) * 2),  # 简单的强度计算
+                            'distance_percent': distance_percent,
+                            'test_count': 1  # 简化版本，实际应该统计测试次数
+                        })
+                
+                # 按强度排序并只保留前3个
+                resistance_levels.sort(key=lambda x: x['strength'], reverse=True)
+                support_levels.sort(key=lambda x: x['strength'], reverse=True)
+                
+                levels[interval] = {
+                    'resistance': resistance_levels[:3],
+                    'support': support_levels[:3]
+                }
+                
+            except Exception as e:
+                logger.error(f"❌ 计算{symbol}的{interval}阻力位失败: {str(e)}")
+                levels[interval] = {'resistance': [], 'support': []}
+        
+        return {
+            'levels': levels,
+            'current_price': current_price
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ 计算阻力位失败: {symbol}, {str(e)}")
+        return {
+            'levels': {},
+            'current_price': 0,
+            'error': str(e)
+        }
+
 def analyze_trends():
     """优化后的趋势分析逻辑 - 直接并行处理所有币种"""
     start_time = time.time()

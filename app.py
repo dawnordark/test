@@ -16,8 +16,8 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, send_from_directory
 
-# 检查是否在 Render 环境
-IS_RENDER = os.environ.get('RENDER', False)
+# 检查是否在 Zeabur 环境
+IS_ZEABUR = os.environ.get('ZEABUR', False) or 'ZEABUR' in os.environ
 
 # 简化日志配置
 logging.basicConfig(
@@ -66,7 +66,7 @@ OI_CACHE_EXPIRATION = 5 * 60
 
 # 使用队列进行线程间通信
 analysis_queue = queue.Queue()
-executor = ThreadPoolExecutor(max_workers=5)  # 增加工作线程数
+executor = ThreadPoolExecutor(max_workers=10)
 
 # 周期配置
 PERIOD_MINUTES = {
@@ -317,7 +317,7 @@ def get_high_volume_symbols():
         return []
 
 def analyze_trends():
-    """优化后的趋势分析逻辑"""
+    """优化后的趋势分析逻辑 - 直接并行处理所有币种"""
     start_time = time.time()
     logger.info("🔍 开始优化分析币种趋势...")
     
@@ -328,67 +328,66 @@ def analyze_trends():
         logger.warning("⚠️ 没有获取到高交易量币种，返回空数据")
         return data_cache
 
+    logger.info(f"📊 开始并行分析 {len(symbols)} 个币种...")
+    
+    # 步骤2: 并行分析短期活跃币种
+    logger.info(f"🔄 并行分析短期活跃币种...")
+    short_term_start = time.time()
+    short_term_futures = [executor.submit(analyze_short_term_active, symbol) for symbol in symbols]
     short_term_active = []
-    daily_rising = []
+    
+    for future in as_completed(short_term_futures):
+        try:
+            result = future.result()
+            if result:
+                short_term_active.append(result)
+        except Exception as e:
+            logger.error(f"❌ 处理短期活跃币种时出错: {str(e)}")
+    
+    short_term_time = time.time() - short_term_start
+    logger.info(f"✅ 短期活跃分析完成: {len(short_term_active)}个, 耗时: {short_term_time:.2f}秒")
+    
+    # 步骤3: 并行分析日线上涨币种
+    logger.info(f"🔄 并行分析日线上涨币种...")
+    daily_start = time.time()
+    daily_futures = [executor.submit(analyze_daily_rising, symbol) for symbol in symbols]
+    daily_results = []
+    
+    for future in as_completed(daily_futures):
+        try:
+            result = future.result()
+            if result:
+                daily_results.append(result)
+        except Exception as e:
+            logger.error(f"❌ 处理日线上涨币种时出错: {str(e)}")
+    
+    daily_time = time.time() - daily_start
+    logger.info(f"✅ 日线上涨分析完成: {len(daily_results)}个, 耗时: {daily_time:.2f}秒")
+    
+    # 步骤4: 对日线上涨币种进行全部周期分析
+    logger.info(f"🔄 并行分析全部周期上涨币种...")
+    all_cycle_start = time.time()
+    all_cycle_futures = [executor.submit(analyze_all_cycle_rising, result['symbol'], result) for result in daily_results]
     all_cycle_rising = []
-
-    logger.info(f"📊 开始分析 {len(symbols)} 个币种...")
     
-    # 分批处理币种
-    batch_size = 20
-    batches = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+    for future in as_completed(all_cycle_futures):
+        try:
+            result = future.result()
+            if result:
+                all_cycle_rising.append(result)
+        except Exception as e:
+            logger.error(f"❌ 处理全部周期上涨币种时出错: {str(e)}")
     
-    for batch_num, batch in enumerate(batches):
-        logger.info(f"📦 处理批次 {batch_num + 1}/{len(batches)} ({len(batch)} 个币种)")
-        
-        # 步骤2: 分析短期活跃币种
-        logger.info(f"🔄 分析短期活跃币种...")
-        short_term_futures = [executor.submit(analyze_short_term_active, symbol) for symbol in batch]
-        
-        for future in as_completed(short_term_futures):
-            try:
-                result = future.result()
-                if result:
-                    short_term_active.append(result)
-            except Exception as e:
-                logger.error(f"❌ 处理短期活跃币种时出错: {str(e)}")
-        
-        # 步骤3: 分析日线上涨币种
-        logger.info(f"🔄 分析日线上涨币种...")
-        daily_futures = [executor.submit(analyze_daily_rising, symbol) for symbol in batch]
-        daily_results = []
-        
-        for future in as_completed(daily_futures):
-            try:
-                result = future.result()
-                if result:
-                    daily_results.append(result)
-            except Exception as e:
-                logger.error(f"❌ 处理日线上涨币种时出错: {str(e)}")
-        
-        # 步骤4: 对日线上涨币种进行全部周期分析
-        logger.info(f"🔄 分析全部周期上涨币种...")
-        all_cycle_futures = [executor.submit(analyze_all_cycle_rising, result['symbol'], result) for result in daily_results]
-        
-        for future in as_completed(all_cycle_futures):
-            try:
-                result = future.result()
-                if result:
-                    all_cycle_rising.append(result)
-            except Exception as e:
-                logger.error(f"❌ 处理全部周期上涨币种时出错: {str(e)}")
-        
-        # 将日线上涨但非全部周期上涨的币种加入daily_rising
-        daily_rising_symbols = {r['symbol'] for r in daily_rising}
-        all_cycle_symbols = {r['symbol'] for r in all_cycle_rising}
-        
-        for result in daily_results:
-            if result['symbol'] not in all_cycle_symbols:
-                daily_rising.append(result)
-        
-        # 批次之间短暂休息
-        if batch_num < len(batches) - 1:
-            time.sleep(1)
+    all_cycle_time = time.time() - all_cycle_start
+    logger.info(f"✅ 全部周期分析完成: {len(all_cycle_rising)}个, 耗时: {all_cycle_time:.2f}秒")
+    
+    # 将日线上涨但非全部周期上涨的币种加入daily_rising
+    daily_rising = []
+    all_cycle_symbols = {r['symbol'] for r in all_cycle_rising}
+    
+    for result in daily_results:
+        if result['symbol'] not in all_cycle_symbols:
+            daily_rising.append(result)
 
     # 排序结果
     daily_rising.sort(key=lambda x: x.get('period_count', 0), reverse=True)
@@ -494,35 +493,45 @@ def start_background_threads():
         "next_analysis_time": get_next_analysis_time().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    # 延迟启动分析线程（避免阻塞应用启动）
-    def delayed_start():
-        time.sleep(10)  # 等待10秒让应用先启动
-        
-        logger.info("🔄 开始初始化分析组件...")
-        
-        # 初始化客户端
-        if not init_client():
-            logger.error("❌ 无法初始化客户端，部分功能可能不可用")
-            # 即使客户端初始化失败，也继续启动分析线程，但会返回空数据
-        else:
-            logger.info("✅ 客户端初始化成功")
-        
-        # 启动分析线程
-        global analysis_thread
-        analysis_thread = threading.Thread(target=analysis_worker, name="AnalysisWorker")
-        analysis_thread.daemon = True
-        analysis_thread.start()
-        
-        logger.info("🔄 分析线程已启动，将在下一个5分钟周期+45秒后开始分析")
+    # 在 Zeabur 环境中，立即启动分析线程，不延迟
+    logger.info("🔄 开始初始化分析组件...")
     
-    start_thread = threading.Thread(target=delayed_start)
-    start_thread.daemon = True
-    start_thread.start()
+    # 初始化客户端
+    if not init_client():
+        logger.error("❌ 无法初始化客户端，部分功能可能不可用")
+        # 即使客户端初始化失败，也继续启动分析线程，但会返回空数据
+    else:
+        logger.info("✅ 客户端初始化成功")
+    
+    # 启动分析线程
+    global analysis_thread
+    analysis_thread = threading.Thread(target=analysis_worker, name="AnalysisWorker")
+    analysis_thread.daemon = True
+    analysis_thread.start()
+    
+    logger.info("🔄 分析线程已启动，将在下一个5分钟周期+45秒后开始分析")
+    
+    # 在 Zeabur 环境中，立即执行一次分析
+    if IS_ZEABUR:
+        logger.info("🚀 Zeabur环境：立即执行首次分析...")
+        try:
+            result = analyze_trends()
+            current_data_cache = {
+                "last_updated": result['last_updated'],
+                "daily_rising": result['daily_rising'],
+                "short_term_active": result['short_term_active'],
+                "all_cycle_rising": result['all_cycle_rising'],
+                "analysis_time": result['analysis_time'],
+                "next_analysis_time": result['next_analysis_time']
+            }
+            logger.info("✅ Zeabur环境：首次分析完成")
+        except Exception as e:
+            logger.error(f"❌ Zeabur环境：首次分析失败: {str(e)}")
     
     logger.info("✅ 后台线程启动成功")
     return True
 
-# API路由和其他函数保持不变...
+# API路由
 @app.route('/')
 def index():
     try:
@@ -608,6 +617,14 @@ def get_resistance_levels(symbol):
         if not BINANCE_AVAILABLE:
             return jsonify({'error': 'Binance client not available'}), 503
 
+        # 简化阻力位计算函数
+        def calculate_resistance_levels(symbol):
+            try:
+                logger.info(f"📊 计算阻力位: {symbol}")
+            except Exception as e:
+                logger.error(f"计算{symbol}的阻力位失败: {str(e)}")
+                return {'levels': {}, 'current_price': 0}
+            
         levels = calculate_resistance_levels(symbol)
         
         return jsonify(levels)
@@ -656,7 +673,7 @@ def health_check():
             'last_updated': current_data_cache.get('last_updated', 'N/A'),
             'next_analysis_time': current_data_cache.get('next_analysis_time', 'N/A'),
             'server_time': datetime.now(tz_shanghai).strftime("%Y-%m-%d %H:%M:%S"),
-            'environment': 'render' if IS_RENDER else 'local'
+            'environment': 'zeabur' if IS_ZEABUR else 'local'
         })
     except Exception as e:
         return jsonify({
@@ -702,22 +719,34 @@ def trigger_analysis():
             'message': str(e)
         }), 500
 
-# 删除原有的 if __name__ == '__main__': 部分，替换为：
+@app.route('/api/debug', methods=['GET'])
+def debug_info():
+    """调试信息"""
+    return jsonify({
+        'zeabur_env': IS_ZEABUR,
+        'analysis_thread_running': analysis_thread_running,
+        'binance_available': BINANCE_AVAILABLE,
+        'api_key_set': bool(API_KEY),
+        'api_secret_set': bool(API_SECRET),
+        'current_time': datetime.now().isoformat(),
+        'cache_keys': list(oi_data_cache.keys())[:5]  # 显示前5个缓存键
+    })
 
-def create_app():
-    """创建应用实例，用于 Zeabur 部署"""
-    if start_background_threads():
-        logger.info("✅ 应用初始化完成")
-    return app
-
-# 为了兼容 Zeabur，保留这个启动方式
 if __name__ == '__main__':
-    PORT = int(os.environ.get("PORT", 10000))
+    # 在 Zeabur 中，端口由环境变量决定
+    PORT = int(os.environ.get("PORT", 8080))
     
     logger.info("=" * 50)
     logger.info(f"🚀 启动加密货币持仓量分析服务")
     logger.info(f"🌐 服务端口: {PORT}")
-    logger.info(f"🏷️ 环境: {'Zeabur' if 'ZEABUR' in os.environ else 'Local'}")
+    logger.info(f"🏷️ 环境: {'Zeabur' if IS_ZEABUR else 'Local'}")
     logger.info("=" * 50)
     
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    # 立即启动后台线程，不等待
+    if start_background_threads():
+        logger.info("🚀 启动服务器...")
+        
+        # 在 Zeabur 环境中使用简单的启动方式
+        app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+    else:
+        logger.critical("🔥 无法启动服务")
